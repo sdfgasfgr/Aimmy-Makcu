@@ -1,63 +1,106 @@
-#not sure if im doing this right lol
-name: .NET Core Desktop
+name: Desktop CI – Self-contained EXE
 
 on:
   push:
-    branches: [ "Aimmy-V2" ]
+    branches: [ "master" ]
   pull_request:
-    branches: [ "Aimmy-V2" ]
+    branches: [ "master" ]
 
 jobs:
-
   build:
-    strategy:
-      matrix:
-        targetplatform: [x64]
-        configuration: [Release]
-
-    runs-on: windows-latest  # For a list of available runner types, refer to
-                             # https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idruns-on
+    runs-on: windows-latest
 
     env:
-      Solution_Name: Aimmy2.sln                         # Replace with your solution name, i.e. MyWpfApp.sln.
-      Wpf_Project_Path: Aimmy2\Aimmy2.csproj
-      #Wap_Project_Name: MyWpfApp.Package.wapproj
-      
+      WORKSPACE: ${{ github.workspace }}
+      Solution_Path: Aimmy2.sln
+      Project_Path: Aimmy2/Aimmy2.csproj
+      Configuration: Release
+      Runtime_Id: win-x64
+
     steps:
-    - name: Checkout
+    # 1. Checkout
+    - name: Checkout source
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
-    # Install the .NET Core workload
-    - name: Install .NET Core
+    # 2. Install .NET SDK and MSBuild
+    - name: Install .NET 8 SDK
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 8.0.x
 
-    # Add  MSBuild to the PATH: https://github.com/microsoft/setup-msbuild
-    - name: Setup MSBuild.exe
+    - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    # Restore the application
-    - name:  Restore the Wpf application to populate the obj folder
-      run: msbuild $env:Solution_Path /t:Restore /p:Configuration=$env:Configuration /p:RuntimeIdentifier=$env:RuntimeIdentifier
-      env:
-        Configuration: Debug
-        RuntimeIdentifier: win-${{ matrix.targetplatform }}
-        
-    # Build the Windows Application Packaging project
-    - name: Build release x64
-      run: msbuild $env:Solution_Path /p:Platform=$env:TargetPlatform /p:Configuration=$env:Configuration /p:UapAppxPackageBuildMode=$env:BuildMode /p:AppxBundle=$env:AppxBundle /p:PackageCertificateKeyFile=$env:SigningCertificate /p:PackageCertificatePassword=${{ secrets.Pfx_Key }}
-      env:
-        AppxBundle: Never
-        BuildMode: SideLoadOnly
-        Configuration: Release
-        TargetPlatform: ${{ matrix.targetplatform }}
+    # 3. Set version number (1.0.<run>)
+    - name: Set version
+      id: version
+      shell: pwsh
+      run: |
+        $v = "1.0.${{ github.run_number }}"
+        echo "VERSION=$v" >> $env:GITHUB_ENV
+        echo "version=$v" >> $env:GITHUB_OUTPUT
 
-    # Upload the MSIX package: https://github.com/marketplace/actions/upload-a-build-artifact
-    - name: Upload build artifacts
+    # 4. Restore packages
+    - name: Restore NuGet packages
+      run: msbuild $env:Solution_Path -t:Restore -p:Configuration=$env:Configuration
+
+    # 5. Publish self-contained single file
+    - name: Publish self-contained single file
+      shell: pwsh
+      run: |
+        dotnet publish $env:Project_Path `
+          -c $env:Configuration `
+          -r $env:Runtime_Id `
+          --self-contained true `
+          -p:PublishSingleFile=true `
+          -p:IncludeNativeLibrariesForSelfExtract=true `
+          -p:PublishTrimmed=false `
+          -p:GenerateAssemblyInfo=true `
+          -p:AssemblyVersion=$env:VERSION `
+          -p:FileVersion=$env:VERSION `
+          -p:PackageVersion=$env:VERSION `
+          -p:NuGetVersion=$env:VERSION `
+          -o "$env:WORKSPACE/publish"
+
+    # 6. List output for debugging (optional)
+    - name: Verify publish output
+      shell: pwsh
+      run: Get-ChildItem -Recurse "$env:WORKSPACE/publish"
+
+    # 7. Zip the publish output
+    - name: Create ZIP package
+      shell: pwsh
+      run: |
+        Compress-Archive -Path "$env:WORKSPACE/publish/*" `
+                         -DestinationPath "$env:WORKSPACE/Aimmy2_${{ steps.version.outputs.version }}.zip"
+
+    # 8. Upload as build artifact
+    - name: Upload build artifact
       uses: actions/upload-artifact@v4
       with:
-        name: aimmyidk
-        path: Aimmy2\bin\x64\Release\
+        name: Aimmy2_${{ steps.version.outputs.version }}
+        path: ${{ env.WORKSPACE }}/Aimmy2_${{ steps.version.outputs.version }}.zip
+
+    # 9. Create GitHub release
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        release_name: Aimmy2 ${{ steps.version.outputs.version }}
+        generate_release_notes: true
+
+    # 10. Attach ZIP to the GitHub Release
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ${{ env.WORKSPACE }}/Aimmy2_${{ steps.version.outputs.version }}.zip
+        asset_name: Aimmy2_${{ steps.version.outputs.version }}.zip
+        asset_content_type: application/zip
